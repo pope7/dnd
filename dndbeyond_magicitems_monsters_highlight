@@ -1,0 +1,317 @@
+// ==UserScript==
+// @name         D&D Beyond: Highlights for Magic Items and Monsters
+// @namespace    http://tampermonkey.net/
+// @version      2025-06-30
+// @description  Highlights D&D Beyond magic items and monsters, scrolls between.
+// @author       You
+// @match        https://www.dndbeyond.com/sources/dnd/*
+// @icon         https://www.google.com/s2/favicons?sz=64&domain=dndbeyond.com
+// @grant        GM_addStyle
+// ==/UserScript==
+
+var magicitem_color = "#0f5cbc";
+var monster_color = "#bc0f0f";
+
+function hexToRGBA(hex, alpha) {
+    hex = hex.replace('#', '');
+    let r = parseInt(hex.substring(0, 2), 16);
+    let g = parseInt(hex.substring(2, 4), 16);
+    let b = parseInt(hex.substring(4, 6), 16);
+    return `rgba(${r},${g},${b},${alpha})`;
+}
+
+function addCSS(id, css) {
+    let styleTag = document.getElementById(id);
+    if (!styleTag) {
+        styleTag = document.createElement('style');
+        styleTag.id = id;
+        styleTag.textContent = css;
+        document.head.appendChild(styleTag);
+    }
+}
+
+function removeCSS(id) {
+    const styleTag = document.getElementById(id);
+    if (styleTag) styleTag.remove();
+}
+
+const container = document.createElement('div');
+container.style.position = 'fixed';
+container.style.top = '0';
+container.style.right = '10px';
+container.style.width = '20px';
+container.style.pointerEvents = 'none';
+container.style.zIndex = '9999';
+document.body.appendChild(container);
+
+const arrows = [];
+
+const scrollState = {
+    '.monster-tooltip': { index: -1, label: null, visible: true },
+    '.magic-item-tooltip': { index: -1, label: null, visible: true }
+};
+
+let suppressScrollUpdateUntil = 0;
+
+function createArrow(tooltip, color) {
+    const arrow = document.createElement('div');
+    arrow.textContent = '◄';
+    arrow.style.position = 'absolute';
+    arrow.style.right = '0';
+    arrow.style.color = color;
+    arrow.style.fontSize = '16px';
+    arrow.style.userSelect = 'none';
+    container.appendChild(arrow);
+    arrows.push({ arrow, tooltip });
+}
+
+function updateArrowsPosition() {
+    const lineGroups = new Map();
+    arrows.forEach(({ arrow, tooltip }) => {
+        const rect = tooltip.getBoundingClientRect();
+        const top = Math.round(rect.top + rect.height / 2 - 11);
+        if (!lineGroups.has(top)) lineGroups.set(top, []);
+        lineGroups.get(top).push({ arrow, top });
+    });
+    lineGroups.forEach((group, top) => {
+        const offsetStep = 12;
+        const total = group.length;
+        const startOffset = -((total - 1) * offsetStep) / 2;
+        group.forEach(({ arrow }, index) => {
+            const offset = startOffset + index * offsetStep;
+            arrow.style.top = `${top + offset}px`;
+        });
+    });
+}
+
+function setup() {
+    arrows.length = 0;
+    container.innerHTML = '';
+    document.querySelectorAll('.magic-item-tooltip').forEach(el => createArrow(el, magicitem_color));
+    document.querySelectorAll('.monster-tooltip').forEach(el => createArrow(el, monster_color));
+    updateArrowsPosition();
+}
+
+function createControlPanel() {
+    const panel = document.createElement('div');
+    panel.style.position = 'fixed';
+    panel.style.bottom = '10px';
+    panel.style.right = '90px';
+    panel.style.zIndex = '10000';
+    panel.style.display = 'flex';
+    panel.style.flexDirection = 'column';
+    panel.style.gap = '6px';
+
+    const makeRow = () => {
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.gap = '0px';
+        row.style.alignItems = 'center';
+        row.style.justifyContent = 'flex-end';
+        return row;
+    };
+
+    function makeButton(label, onclick) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.style.padding = '6px 8px';
+        btn.style.marginRight = '6px'
+        btn.style.fontSize = '12px';
+        btn.style.cursor = 'pointer';
+        btn.style.minWidth = '140px';
+        btn.onclick = onclick;
+        return btn;
+    }
+
+    function makeIndicator(selector) {
+        const label = document.createElement('span');
+        label.style.textAlign = 'right';
+        label.style.fontFamily = 'monospace';
+        label.style.minWidth = '100px';
+        label.style.padding = '2px 14px 2px 4px'
+        label.style.backgroundColor = 'white';
+        label.style.borderRadius = '8px 0 0 8px';
+        label.style.boxShadow = 'rgba(50, 50, 93, 0.25) 0px 6px 12px -2px, rgba(0, 0, 0, 0.3) 0px 3px 7px -3px';
+        scrollState[selector].label = label;
+        return label;
+    }
+
+    addCSS('custom-row-styles', `
+        .monster-row button {
+            background-color: ${monster_color};
+            color: white;
+            border: 1px solid ${monster_color};
+            border-radius: 6px;
+            box-shadow: rgba(50, 50, 93, 0.25) 0px 6px 12px -2px, rgba(0, 0, 0, 0.3) 0px 3px 7px -3px;
+        }
+        .magic-row button {
+            background-color: ${magicitem_color};
+            color: white;
+            border: 1px solid ${magicitem_color};
+            border-radius: 6px;
+            box-shadow: rgba(50, 50, 93, 0.25) 0px 6px 12px -2px, rgba(0, 0, 0, 0.3) 0px 3px 7px -3px;
+        }
+    `);
+
+    const monsterRow = makeRow();
+    monsterRow.classList.add('monster-row');
+
+    const magicRow = makeRow();
+    magicRow.classList.add('magic-row');
+
+    const monsterToggle = makeButton('👁 Toggle Monsters', () => {
+        toggleVisibility('.monster-tooltip');
+    });
+    const monsterNext = makeButton('Next Monster ►', () => {
+        scrollToOffset('.monster-tooltip', 1);
+    });
+    const monsterPrev = makeButton('◄ Prev Monster', () => {
+        scrollToOffset('.monster-tooltip', -1);
+    });
+
+    const magicToggle = makeButton('👁 Toggle Magic Items', () => {
+        toggleVisibility('.magic-item-tooltip');
+    });
+    const magicNext = makeButton('Next Magic Item ►', () => {
+        scrollToOffset('.magic-item-tooltip', 1);
+    });
+    const magicPrev = makeButton('◄ Prev Magic Item', () => {
+        scrollToOffset('.magic-item-tooltip', -1);
+    });
+
+    monsterRow.append(makeIndicator('.monster-tooltip'), monsterToggle, monsterPrev, monsterNext);
+    magicRow.append(makeIndicator('.magic-item-tooltip'), magicToggle, magicPrev, magicNext);
+
+    panel.append(monsterRow, magicRow);
+    document.body.appendChild(panel);
+}
+
+function toggleVisibility(selector) {
+    const visible = scrollState[selector].visible = !scrollState[selector].visible;
+    arrows.forEach(({ arrow, tooltip }) => {
+        if (tooltip.matches(selector)) {
+            arrow.style.visibility = visible ? 'visible' : 'hidden';
+        }
+    });
+    if (selector === '.magic-item-tooltip') {
+        visible ? addCSS('magicitem-style', magicItemCSS) : removeCSS('magicitem-style');
+    }
+    if (selector === '.monster-tooltip') {
+        visible ? addCSS('monster-style', monsterCSS) : removeCSS('monster-style');
+    }
+}
+
+function scrollToOffset(selector, delta) {
+    const tooltips = [...document.querySelectorAll(selector)];
+    if (!tooltips.length) return;
+
+    let currentIndex = scrollState[selector].index;
+    if (currentIndex < 0) currentIndex = 0;
+    let nextIndex = currentIndex + delta;
+
+    if (nextIndex < 0) nextIndex = tooltips.length - 1;
+    if (nextIndex >= tooltips.length) nextIndex = 0;
+
+    scrollState[selector].index = nextIndex;
+
+    const target = tooltips[nextIndex];
+    if (target) {
+        const y = target.getBoundingClientRect().top + window.scrollY;
+        suppressScrollUpdateUntil = Date.now() + 200;
+        window.scrollTo({ top: y - window.innerHeight / 2 });
+    }
+}
+
+function updateNavigationIndexOnScroll() {
+    if (Date.now() < suppressScrollUpdateUntil) return;
+
+    ['.monster-tooltip', '.magic-item-tooltip'].forEach(selector => {
+        const tooltips = [...document.querySelectorAll(selector)];
+        if (!tooltips.length) return;
+
+        const rects = tooltips.map((el, i) => ({ el, index: i, top: el.getBoundingClientRect().top }));
+        const visible = rects.filter(r => r.top >= 0 && r.top <= window.innerHeight);
+
+        if (visible.length > 0) {
+            scrollState[selector].index = visible[0].index;
+        } else {
+            const closestAbove = rects.filter(r => r.top <= 0).pop() || rects[0];
+            scrollState[selector].index = closestAbove.index;
+        }
+
+    });
+}
+
+function updateIndicator(selector) {
+    const label = scrollState[selector].label;
+    const tooltips = [...document.querySelectorAll(selector)];
+    if (!tooltips.length) {
+        label.textContent = `– / 0`;
+        return;
+    }
+
+    const rects = tooltips.map((el, i) => ({ el, index: i, top: el.getBoundingClientRect().top }));
+    const visible = rects.filter(r => r.top >= 0 && r.top <= window.innerHeight);
+
+    if (visible.length === 1) {
+        label.textContent = `${visible[0].index + 1}/${tooltips.length}`;
+    } else if (visible.length > 1) {
+        label.textContent = `${visible[0].index + 1}-${visible[visible.length - 1].index + 1}/${tooltips.length}`;
+    } else {
+        const closestAbove = rects.filter(r => r.top <= 0).pop() || rects[0];
+        label.textContent = `${closestAbove.index + 1}/${tooltips.length}`;
+    }
+}
+
+const magicItemCSS = `
+a.magic-item-tooltip, .tooltip-hover.magic-item-tooltip {
+    background-color: ${hexToRGBA(magicitem_color, 0.1)} !important;
+    padding: 2px 8px !important;
+    margin: 2px 0px !important;
+    border: 2px solid ${magicitem_color} !important;
+    border-radius: 8px !important;
+    font-weight: bold !important;
+}
+`;
+
+const monsterCSS = `
+a.monster-tooltip, .tooltip-hover.monster-tooltip {
+    background-color: ${hexToRGBA(monster_color, 0.1)} !important;
+    padding: 4px 8px !important;
+    margin: 4px 0px !important;
+    border: 2px solid ${monster_color} !important;
+    border-radius: 8px !important;
+    font-weight: bold !important;
+}
+`;
+
+(function () {
+    'use strict';
+    addCSS('magicitem-style', magicItemCSS);
+    addCSS('monster-style', monsterCSS);
+    setup();
+    createControlPanel();
+    window.addEventListener('scroll', () => {
+        updateArrowsPosition();
+        updateNavigationIndexOnScroll();
+        updateIndicator('.monster-tooltip');
+        updateIndicator('.magic-item-tooltip');
+    });
+
+    window.addEventListener('resize', () => {
+        updateArrowsPosition();
+        updateNavigationIndexOnScroll();
+        updateIndicator('.monster-tooltip');
+        updateIndicator('.magic-item-tooltip');
+    });
+    [100, 500, 1500].forEach(delay =>
+        setTimeout(() => {
+            updateArrowsPosition();
+            updateNavigationIndexOnScroll();
+        }, delay)
+    );
+    setTimeout(() => {
+        updateIndicator('.monster-tooltip');
+        updateIndicator('.magic-item-tooltip');
+    }, 500);
+})();
